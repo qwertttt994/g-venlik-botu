@@ -37,6 +37,11 @@ http
     console.log(`HTTP sunucu ${PORT} portunda aktif.`);
   });
 
+// Her 5 dakikada bir kendi HTTP adresine istek atar
+setInterval(() => {
+  fetch('https://g-venlik-botu-3.onrender.com').catch(() => {});
+}, 5 * 60 * 1000);
+
 const dbPath = path.join(__dirname, 'blacklist-db.json');
 if (!fs.existsSync(dbPath)) {
   fs.writeFileSync(dbPath, JSON.stringify({ blacklist: {}, actions: [] }, null, 2));
