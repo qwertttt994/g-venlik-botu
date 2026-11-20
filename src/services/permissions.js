@@ -1,5 +1,5 @@
 const config = require('../config/config');
-const { isWhitelistedId } = require('../database/database');
+const { isWhitelistedId, getGuildConfig } = require('../database/database');
 
 function isProtectedRole(role, guild) {
   if (!role || !guild) return true;
@@ -26,6 +26,17 @@ function isWhitelisted(memberOrId, guild) {
       : guild?.members?.cache?.get(userId);
 
   if (member?.roles?.cache?.some((r) => isWhitelistedId(r.id))) {
+    return true;
+  }
+  return false;
+}
+
+function isAutoModExempt(message) {
+  const gCfg = getGuildConfig();
+  if (!message?.channel || !message?.guild) return false;
+  if (gCfg.autoMod.exemptChannels.includes(message.channel.id)) return true;
+  if (isWhitelisted(message.member, message.guild)) return true;
+  if (message.member?.roles?.cache?.some((r) => gCfg.autoMod.exemptRoles.includes(r.id))) {
     return true;
   }
   return false;
@@ -60,5 +71,6 @@ module.exports = {
   isProtectedRole,
   isDangerousRole,
   isWhitelisted,
+  isAutoModExempt,
   canModerateTarget,
 };
