@@ -1,51 +1,86 @@
 const { EmbedBuilder } = require('discord.js');
 const config = require('../config/config');
-const { recordActionAndCount, getState, setState, addRisk, createCase } = require('../database/database');
+const {
+  getGuildConfig,
+  recordActionAndCount,
+  getState,
+  setState,
+  addRisk,
+  createCase,
+} = require('../database/database');
 
 const RAID_KEY = 'raid_state';
 
 function getRaidStatus() {
-  const raw = getState(RAID_KEY, { active: false, until: 0 });
+  const raw = getState(RAID_KEY, { active: false, until: 0, reason: null });
   const now = Date.now();
   if (raw.active && now >= Number(raw.until || 0)) {
-    const cleared = { active: false, until: 0 };
+    const cleared = { active: false, until: 0, reason: null };
     setState(RAID_KEY, cleared);
     return cleared;
   }
   return {
     active: Boolean(raw.active),
     until: Number(raw.until || 0),
+    reason: raw.reason || null,
   };
+}
+
+async function activateRaidShield(guild, reason, logger) {
+  const gcfg = getGuildConfig();
+  const next = {
+    active: true,
+    until: Date.now() + gcfg.raid.durationMs,
+    reason,
+  };
+  setState(RAID_KEY, next);
+  await logger.sendSystemAlert(
+    guild,
+    '⚠️ RAİD KALKANI AKTİF',
+    `**Sebep:** ${reason}\n**Süre:** \`${Math.round(gcfg.raid.durationMs / 60000)} dakika\``,
+    0xf97316
+  );
+  return next;
 }
 
 async function evaluateMemberJoin(member, logger) {
   const guild = member.guild;
-  const joinCount = recordActionAndCount('SYSTEM_RAID', 'MEMBER_JOIN', member.id, config.raid.joinWindowMs);
-  let raid = getRaidStatus();
+  const gcfg = getGuildConfig();
 
-  if (joinCount >= config.raid.joinThreshold) {
-    raid = { active: true, until: Date.now() + config.raid.durationMs };
-    setState(RAID_KEY, raid);
-    await logger.sendSystemAlert(
+  const joinCount = recordActionAndCount(
+    'SYSTEM_RAID',
+    'MEMBER_JOIN',
+    member.id,
+    gcfg.raid.joinWindowMs
+  );
+
+  let raid = getRaidStatus();
+  if (joinCount >= gcfg.raid.joinThreshold) {
+    raid = await activateRaidShield(
       guild,
-      '⚠️ RAİD KALKANI AKTİF',
-      `${config.raid.joinWindowMs / 1000} saniyede \`${joinCount}\` giriş algılandı. Koruma penceresi açıldı.`,
-      0xf97316
+      `${Math.round(gcfg.raid.joinWindowMs / 1000)} saniyede ${joinCount} toplu giriş`,
+      logger
     );
   }
 
-  if (!raid.active) return;
-
   const accountAgeDays = (Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24);
-  if (accountAgeDays < config.raid.minAccountAgeDays) {
-    const risk = addRisk(member.id, 30);
+  const isFreshAccount = accountAgeDays < gcfg.raid.minAccountAgeDays;
+
+  if (isFreshAccount) {
+    addRisk(member.id, 15, `Yeni hesap (${accountAgeDays.toFixed(1)} gun)`);
+  }
+
+  if (!raid.active && !isFreshAccount) return;
+
+  if (raid.active && isFreshAccount) {
+    const risk = addRisk(member.id, 25, 'Raid sirasinda yeni hesap');
     let quarantined = false;
 
     if (config.quarantineRoleId) {
       const qRole = guild.roles.cache.get(config.quarantineRoleId);
       if (qRole) {
         try {
-          await member.roles.add(qRole, 'Raid koruması: Yeni hesap karantinaya alındı');
+          await member.roles.add(qRole, 'Raid korumasi: Yeni hesap karantinaya alindi');
           quarantined = true;
         } catch (err) {
           logger.logError('RAID_QUARANTINE_ROLE', err, { userId: member.id });
@@ -77,4 +112,26 @@ async function evaluateMemberJoin(member, logger) {
   }
 }
 
-module.exports = { getRaidStatus, evaluateMemberJoin };
+async function evaluateVoiceBurst(newState, logger) {
+  if (!newState.guild || !newState.channelId || !newState.member || newState.member.user.bot) return;
+  const gcfg = getGuildConfig();
+  const count = recordActionAndCount(
+    'SYSTEM_VOICE_RAID',
+    'VOICE_JOIN',
+    newState.member.id,
+    gcfg.raid.voiceBurstWindowMs
+  );
+
+  if (count >= gcfg.raid.voiceBurstThreshold) {
+    const raid = getRaidStatus();
+    if (!raid.active) {
+      await activateRaidShield(
+        newState.guild,
+        `${Math.round(gcfg.raid.voiceBurstWindowMs / 1000)} saniyede ${count} ses kanali hareketi`,
+        logger
+      );
+    }
+  }
+}
+
+module.exports = { getRaidStatus, activateRaidShield, evaluateMemberJoin, evaluateVoiceBurst };
