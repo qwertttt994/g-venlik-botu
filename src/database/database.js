@@ -23,6 +23,12 @@ db.exec(`
   INSERT OR IGNORE INTO counters (name, value) VALUES ('case_seq', 0);
   INSERT OR IGNORE INTO counters (name, value) VALUES ('appeal_seq', 0);
 
+  CREATE TABLE IF NOT EXISTS guild_config (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    config_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS blacklist (
     user_id TEXT PRIMARY KEY,
     banned_by TEXT NOT NULL,
@@ -83,7 +89,6 @@ db.exec(`
     id TEXT PRIMARY KEY,
     seq INTEGER NOT NULL,
     user_id TEXT NOT NULL,
-    case_id TEXT,
     reason TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'PENDING',
     reviewed_by TEXT,
@@ -106,80 +111,94 @@ db.exec(`
   );
 `);
 
-function nextSeq(counterName, prefix) {
+function deepMerge(base, override) {
+  if (!override || typeof override !== 'object') return structuredClone(base);
+  const out = structuredClone(base);
+  for (const [k, v] of Object.entries(override)) {
+    if (Array.isArray(v)) {
+      out[k] = [...v];
+    } else if (v && typeof v === 'object' && out[k] && typeof out[k] === 'object') {
+      out[k] = deepMerge(out[k], v);
+    } else if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function getGuildConfig() {
+  const row = db.prepare('SELECT config_json FROM guild_config WHERE id = 1').get();
+  if (!row) {
+    const initial = structuredClone(config.defaults);
+    db.prepare('INSERT OR REPLACE INTO guild_config (id, config_json, updated_at) VALUES (1, ?, ?)').run(
+      JSON.stringify(initial),
+      Date.now()
+    );
+    return initial;
+  }
+  try {
+    return deepMerge(config.defaults, JSON.parse(row.config_json));
+  } catch {
+    return structuredClone(config.defaults);
+  }
+}
+
+function saveGuildConfig(nextConfig) {
+  const merged = deepMerge(config.defaults, nextConfig);
+  db.prepare('INSERT OR REPLACE INTO guild_config (id, config_json, updated_at) VALUES (1, ?, ?)').run(
+    JSON.stringify(merged),
+    Date.now()
+  );
+  return merged;
+}
+
+function updateGuildConfigPatch(patchFn) {
   const tx = db.transaction(() => {
-    db.prepare('UPDATE counters SET value = value + 1 WHERE name = ?').run(counterName);
-    const row = db.prepare('SELECT value FROM counters WHERE name = ?').get(counterName);
-    const seq = Number(row.value);
-    return { seq, id: `${prefix}-${String(seq).padStart(4, '0')}` };
+    const current = getGuildConfig();
+    const updated = patchFn(current) || current;
+    return saveGuildConfig(updated);
   });
   return tx();
 }
 
-function getGuildConfig() {
-  const stored = getState('guild_config', null);
-  return {
-    antiNuke: { ...config.defaults.antiNuke, ...(stored?.antiNuke || {}) },
-    antiRaid: { ...config.defaults.antiRaid, ...(stored?.antiRaid || {}) },
-    autoMod: {
-      ...config.defaults.autoMod,
-      ...(stored?.autoMod || {}),
-      exemptChannels: Array.isArray(stored?.autoMod?.exemptChannels)
-        ? stored.autoMod.exemptChannels
-        : config.defaults.autoMod.exemptChannels,
-      exemptRoles: Array.isArray(stored?.autoMod?.exemptRoles)
-        ? stored.autoMod.exemptRoles
-        : config.defaults.autoMod.exemptRoles,
-    },
-    adaptive: { ...config.defaults.adaptive, ...(stored?.adaptive || {}) },
-    riskDecay: { ...config.defaults.riskDecay, ...(stored?.riskDecay || {}) },
-  };
+function nextCaseId() {
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE counters SET value = value + 1 WHERE name = ?').run('case_seq');
+    const row = db.prepare('SELECT value FROM counters WHERE name = ?').get('case_seq');
+    const seq = Number(row.value);
+    return { seq, id: `CASE-${String(seq).padStart(4, '0')}` };
+  });
+  return tx();
 }
 
-function updateGuildConfig(patch) {
-  const current = getGuildConfig();
-  const next = {
-    antiNuke: { ...current.antiNuke, ...(patch.antiNuke || {}) },
-    antiRaid: { ...current.antiRaid, ...(patch.antiRaid || {}) },
-    autoMod: { ...current.autoMod, ...(patch.autoMod || {}) },
-    adaptive: { ...current.adaptive, ...(patch.adaptive || {}) },
-    riskDecay: { ...current.riskDecay, ...(patch.riskDecay || {}) },
-  };
-  setState('guild_config', next);
-  return next;
-}
-
-function exportConfigJson() {
-  return JSON.stringify(getGuildConfig(), null, 2);
-}
-
-function importConfigJson(rawJson) {
-  const parsed = JSON.parse(rawJson);
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('Gecersiz JSON konfigurasyonu');
-  }
-  return updateGuildConfig(parsed);
+function nextAppealId() {
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE counters SET value = value + 1 WHERE name = ?').run('appeal_seq');
+    const row = db.prepare('SELECT value FROM counters WHERE name = ?').get('appeal_seq');
+    const seq = Number(row.value);
+    return { seq, id: `APL-${String(seq).padStart(4, '0')}` };
+  });
+  return tx();
 }
 
 function createCase({ type, targetId, moderatorId, reason, meta = null }) {
   const tx = db.transaction(() => {
-    const { seq, id } = nextSeq('case_seq', 'CASE');
+    const { seq, id } = nextCaseId();
     const now = Date.now();
-    const cleanReason = String(reason || 'Sebep belirtilmedi').slice(0, 500);
     db.prepare(
       `INSERT INTO cases (id, seq, type, target_id, moderator_id, reason, meta_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       seq,
-      String(type),
+      type,
       String(targetId),
       String(moderatorId),
-      cleanReason,
+      String(reason || 'Sebep belirtilmedi').slice(0, 500),
       meta ? JSON.stringify(meta).slice(0, 2000) : null,
       now
     );
-    return { id, seq, type, targetId, moderatorId, reason: cleanReason, createdAt: now };
+    return { id, seq, type, targetId, moderatorId, reason, createdAt: now };
   });
   return tx();
 }
@@ -188,6 +207,22 @@ function deleteCaseById(caseId) {
   const normalized = String(caseId).trim().toUpperCase();
   const info = db.prepare('DELETE FROM cases WHERE id = ?').run(normalized);
   return info.changes > 0;
+}
+
+function getRecentCasesForUser(userId, limit = 5) {
+  return db
+    .prepare('SELECT * FROM cases WHERE target_id = ? ORDER BY seq DESC LIMIT ?')
+    .all(String(userId), limit);
+}
+
+function getTotalCases() {
+  return db.prepare('SELECT COUNT(*) AS cnt FROM cases').get().cnt;
+}
+
+function getCaseStatsByType() {
+  return db
+    .prepare('SELECT type, COUNT(*) AS cnt FROM cases GROUP BY type ORDER BY cnt DESC')
+    .all();
 }
 
 function addBlacklist(userId, bannedBy, reason) {
@@ -227,12 +262,12 @@ function removeWhitelist(targetId) {
   return info.changes > 0;
 }
 
-function listWhitelist() {
-  return db.prepare('SELECT * FROM whitelist ORDER BY created_at DESC LIMIT 50').all();
-}
-
 function isWhitelistedId(id) {
   return Boolean(db.prepare('SELECT 1 FROM whitelist WHERE target_id = ?').get(String(id)));
+}
+
+function listWhitelist() {
+  return db.prepare('SELECT * FROM whitelist ORDER BY created_at DESC').all();
 }
 
 function addWarning(userId, moderatorId, reason) {
@@ -246,21 +281,20 @@ function getWarningsCount(userId) {
   return db.prepare('SELECT COUNT(*) AS cnt FROM warnings WHERE user_id = ?').get(String(userId)).cnt;
 }
 
-function addRisk(userId, delta, reason = 'Guvenlik olayi') {
+function addRisk(userId, delta, reason = 'Risk guncellemesi') {
   const tx = db.transaction(() => {
     const now = Date.now();
     const currentRow = db.prepare('SELECT score FROM risk_scores WHERE user_id = ?').get(String(userId));
     const current = currentRow ? Number(currentRow.score) : 0;
-    const step = Number(delta || 0);
-    const next = Math.max(0, Math.min(100, current + step));
+    const change = Number(delta || 0);
+    const next = Math.max(0, Math.min(100, current + change));
     db.prepare(
       `INSERT INTO risk_scores (user_id, score, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at`
     ).run(String(userId), next, now);
     db.prepare(
-      `INSERT INTO risk_history (user_id, delta, score_after, reason, created_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(String(userId), step, next, String(reason).slice(0, 250), now);
+      'INSERT INTO risk_history (user_id, delta, score_after, reason, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(String(userId), change, next, String(reason).slice(0, 250), now);
     return next;
   });
   return tx();
@@ -271,29 +305,26 @@ function getRisk(userId) {
   return row ? Number(row.score) : 0;
 }
 
-function getRiskHistory(userId, limit = 8) {
+function getRiskHistory(userId, limit = 6) {
   return db
     .prepare('SELECT * FROM risk_history WHERE user_id = ? ORDER BY id DESC LIMIT ?')
     .all(String(userId), limit);
 }
 
-function decayAllRisks(amount = 5) {
-  const step = Math.max(1, Number(amount || 5));
+function decayLowRisks(amount = 5, maxTargetScore = 30) {
   const now = Date.now();
   const tx = db.transaction(() => {
-    const rows = db.prepare('SELECT user_id, score FROM risk_scores WHERE score > 0').all();
+    const rows = db
+      .prepare('SELECT user_id, score FROM risk_scores WHERE score > 0 AND score <= ?')
+      .all(maxTargetScore);
     let updated = 0;
     for (const r of rows) {
-      const next = Math.max(0, Number(r.score) - step);
+      const next = Math.max(0, Number(r.score) - amount);
       db.prepare('UPDATE risk_scores SET score = ?, updated_at = ? WHERE user_id = ?').run(
         next,
         now,
         r.user_id
       );
-      db.prepare(
-        `INSERT INTO risk_history (user_id, delta, score_after, reason, created_at)
-         VALUES (?, ?, ?, ?, ?)`
-      ).run(r.user_id, next - Number(r.score), next, 'Zamanla risk erimesi (Decay)', now);
       updated++;
     }
     return updated;
@@ -301,14 +332,18 @@ function decayAllRisks(amount = 5) {
   return tx();
 }
 
-function setQuarantine(userId, roleIds, reason, durationMs = null) {
+function setQuarantine(userId, roleIds, reason, expiresAt = null) {
   const now = Date.now();
-  const expiresAt = durationMs && durationMs > 0 ? now + durationMs : null;
   db.prepare(
     `INSERT OR REPLACE INTO quarantine (user_id, roles_json, reason, expires_at, created_at)
      VALUES (?, ?, ?, ?, ?)`
-  ).run(String(userId), JSON.stringify(roleIds), String(reason || 'Karantina').slice(0, 500), expiresAt, now);
-  return expiresAt;
+  ).run(
+    String(userId),
+    JSON.stringify(roleIds),
+    String(reason || 'Karantina').slice(0, 500),
+    expiresAt ? Number(expiresAt) : null,
+    now
+  );
 }
 
 function getQuarantine(userId) {
@@ -317,48 +352,44 @@ function getQuarantine(userId) {
   return { ...row, roles: JSON.parse(row.roles_json || '[]') };
 }
 
-function getExpiredQuarantines(now = Date.now()) {
-  return db
-    .prepare('SELECT * FROM quarantine WHERE expires_at IS NOT NULL AND expires_at <= ?')
-    .all(now)
-    .map((row) => ({ ...row, roles: JSON.parse(row.roles_json || '[]') }));
-}
-
 function deleteQuarantine(userId) {
   db.prepare('DELETE FROM quarantine WHERE user_id = ?').run(String(userId));
 }
 
-function createAppeal({ userId, caseId, reason }) {
+function getExpiredQuarantines(now = Date.now()) {
+  return db
+    .prepare('SELECT * FROM quarantine WHERE expires_at IS NOT NULL AND expires_at <= ?')
+    .all(now)
+    .map((r) => ({ ...r, roles: JSON.parse(r.roles_json || '[]') }));
+}
+
+function createAppeal(userId, reason) {
   const tx = db.transaction(() => {
-    const { seq, id } = nextSeq('appeal_seq', 'APL');
+    const { seq, id } = nextAppealId();
     const now = Date.now();
-    const cleanReason = String(reason).slice(0, 800);
-    const cleanCase = caseId ? String(caseId).trim().toUpperCase() : null;
     db.prepare(
-      `INSERT INTO appeals (id, seq, user_id, case_id, reason, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)`
-    ).run(id, seq, String(userId), cleanCase, cleanReason, now, now);
-    return { id, seq, userId, caseId: cleanCase, reason: cleanReason, status: 'PENDING', createdAt: now };
+      `INSERT INTO appeals (id, seq, user_id, reason, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
+    ).run(id, seq, String(userId), String(reason).slice(0, 600), now, now);
+    return { id, seq, userId, reason, status: 'PENDING', createdAt: now };
   });
   return tx();
 }
 
-function reviewAppeal(appealId, status, reviewerId, note = '') {
+function reviewAppeal(appealId, status, reviewedBy, note = '') {
   const normalizedId = String(appealId).trim().toUpperCase();
-  const normalizedStatus = String(status).toUpperCase();
-  const now = Date.now();
+  const normalizedStatus = String(status).trim().toUpperCase();
   const info = db
     .prepare(
       `UPDATE appeals
        SET status = ?, reviewed_by = ?, review_note = ?, updated_at = ?
        WHERE id = ?`
     )
-    .run(normalizedStatus, String(reviewerId), String(note || '').slice(0, 500), now, normalizedId);
-  if (info.changes === 0) return null;
-  return db.prepare('SELECT * FROM appeals WHERE id = ?').get(normalizedId);
+    .run(normalizedStatus, String(reviewedBy), String(note).slice(0, 400), Date.now(), normalizedId);
+  return info.changes > 0;
 }
 
-function getAppealById(appealId) {
+function getAppeal(appealId) {
   return db.prepare('SELECT * FROM appeals WHERE id = ?').get(String(appealId).trim().toUpperCase()) || null;
 }
 
@@ -396,29 +427,6 @@ function setState(key, value) {
   ).run(String(key), JSON.stringify(value));
 }
 
-function getRecentCasesForUser(userId, limit = 5) {
-  return db
-    .prepare('SELECT * FROM cases WHERE target_id = ? ORDER BY seq DESC LIMIT ?')
-    .all(String(userId), limit);
-}
-
-function getTotalCases() {
-  return db.prepare('SELECT COUNT(*) AS cnt FROM cases').get().cnt;
-}
-
-function getCaseBreakdown(sinceMs = 24 * 60 * 60 * 1000) {
-  const cutoff = Date.now() - sinceMs;
-  return db
-    .prepare(
-      `SELECT type, COUNT(*) AS cnt
-       FROM cases
-       WHERE created_at >= ?
-       GROUP BY type
-       ORDER BY cnt DESC`
-    )
-    .all(cutoff);
-}
-
 async function createBackupSnapshot() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = path.join(backupDir, `backup-${stamp}.db`);
@@ -431,93 +439,39 @@ async function createBackupSnapshot() {
   return dest;
 }
 
-function listBackups() {
-  if (!fs.existsSync(backupDir)) return [];
-  return fs
-    .readdirSync(backupDir)
-    .filter((f) => f.endsWith('.db'))
-    .sort()
-    .reverse();
-}
-
-function restoreDatabaseFromBackup(backupFileName) {
-  const safeName = path.basename(String(backupFileName || ''));
-  const source = path.join(backupDir, safeName);
-  if (!safeName || !fs.existsSync(source)) {
-    throw new Error('Yedek dosyasi bulunamadi');
-  }
-  const srcDb = new Database(source, { readonly: true });
-  try {
-    const tables = [
-      'counters',
-      'blacklist',
-      'whitelist',
-      'cases',
-      'warnings',
-      'risk_scores',
-      'risk_history',
-      'quarantine',
-      'appeals',
-      'kv_state',
-    ];
-    const tx = db.transaction(() => {
-      for (const tbl of tables) {
-        db.prepare(`DELETE FROM ${tbl}`).run();
-        const rows = srcDb.prepare(`SELECT * FROM ${tbl}`).all();
-        if (rows.length === 0) continue;
-        const cols = Object.keys(rows[0]);
-        const placeholders = cols.map(() => '?').join(', ');
-        const stmt = db.prepare(
-          `INSERT INTO ${tbl} (${cols.join(', ')}) VALUES (${placeholders})`
-        );
-        for (const row of rows) {
-          stmt.run(...cols.map((c) => row[c]));
-        }
-      }
-    });
-    tx();
-    return safeName;
-  } finally {
-    srcDb.close();
-  }
-}
-
 module.exports = {
   db,
   getGuildConfig,
-  updateGuildConfig,
-  exportConfigJson,
-  importConfigJson,
+  saveGuildConfig,
+  updateGuildConfigPatch,
   createCase,
   deleteCaseById,
+  getRecentCasesForUser,
+  getTotalCases,
+  getCaseStatsByType,
   addBlacklist,
   removeBlacklist,
   getBlacklist,
   countBlacklist,
   addWhitelist,
   removeWhitelist,
-  listWhitelist,
   isWhitelistedId,
+  listWhitelist,
   addWarning,
   getWarningsCount,
   addRisk,
   getRisk,
   getRiskHistory,
-  decayAllRisks,
+  decayLowRisks,
   setQuarantine,
   getQuarantine,
-  getExpiredQuarantines,
   deleteQuarantine,
+  getExpiredQuarantines,
   createAppeal,
   reviewAppeal,
-  getAppealById,
+  getAppeal,
   recordActionAndCount,
   getState,
   setState,
-  getRecentCasesForUser,
-  getTotalCases,
-  getCaseBreakdown,
   createBackupSnapshot,
-  listBackups,
-  restoreDatabaseFromBackup,
 };
