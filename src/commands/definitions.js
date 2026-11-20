@@ -99,7 +99,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('sicil')
-    .setDescription('Uyari, vaka ve risk puanini goruntuler.')
+    .setDescription('Uyari, vaka, risk puanini ve son risk gecmisini goruntuler.')
     .addUserOption((o) => o.setName('kullanici').setDescription('Kullanici').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
 
@@ -118,6 +118,7 @@ const commands = [
         .setDescription('Rolleri yedekleyip karantinaya alir.')
         .addUserOption((o) => o.setName('kullanici').setDescription('Kullanici').setRequired(true))
         .addStringOption((o) => o.setName('sebep').setDescription('Sebep').setRequired(false))
+        .addStringOption((o) => o.setName('sure').setDescription('Sure (10m, 1h, 1d)').setRequired(false))
     )
     .addSubcommand((s) =>
       s
@@ -126,6 +127,25 @@ const commands = [
         .addUserOption((o) => o.setName('kullanici').setDescription('Kullanici').setRequired(true))
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
+  new SlashCommandBuilder()
+    .setName('itiraz')
+    .setDescription('Ceza veya karantina icin itiraz kaydi olusturur.')
+    .addStringOption((o) => o.setName('sebep').setDescription('Itiraz gerekcesi').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('itiraz-yonet')
+    .setDescription('Itiraz kaydini onaylar veya reddeder (Yalnizca Sunucu Sahibi).')
+    .addStringOption((o) => o.setName('itiraz_id').setDescription('Ornek: APL-0001').setRequired(true))
+    .addStringOption((o) =>
+      o
+        .setName('karar')
+        .setDescription('Karar')
+        .setRequired(true)
+        .addChoices({ name: 'onayla', value: 'APPROVED' }, { name: 'reddet', value: 'REJECTED' })
+    )
+    .addStringOption((o) => o.setName('not').setDescription('Aciklama notu').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName('temizle')
@@ -157,7 +177,47 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('yedek-al')
-    .setDescription('Sunucu yapi yedegi alir (Yalnizca Sunucu Sahibi).')
+    .setDescription('Sunucu yapi ve SQLite yedegi alir (Yalnizca Sunucu Sahibi).')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('ayar')
+    .setDescription('Canli guvenlik ayarlarini goruntuler veya gunceller (Yalnizca Sunucu Sahibi).')
+    .addSubcommand((s) => s.setName('goruntule').setDescription('Mevcut ayarlari gosterir.'))
+    .addSubcommand((s) =>
+      s
+        .setName('antinuke-esik')
+        .setDescription('Anti-Nuke esik degerini ayarlar (1-20).')
+        .addIntegerOption((o) => o.setName('deger').setDescription('Esik').setMinValue(1).setMaxValue(20).setRequired(true))
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('raid-esik')
+        .setDescription('Anti-Raid 10sn giris esigini ayarlar (2-50).')
+        .addIntegerOption((o) => o.setName('deger').setDescription('Esik').setMinValue(2).setMaxValue(50).setRequired(true))
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('automod')
+        .setDescription('AutoMod durumunu acar/kapatir.')
+        .addBooleanOption((o) => o.setName('aktif').setDescription('true/false').setRequired(true))
+    )
+    .addSubcommand((s) => s.setName('disa-aktar').setDescription('Canli ayarlari JSON olarak verir.'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('guvenlik-denetimi')
+    .setDescription('Sunucu izin, rol ve koruma sagligini denetler.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('istatistik')
+    .setDescription('Vaka dagilimi ve guvenlik analitiklerini gosterir.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('guvenlik-test')
+    .setDescription('Guvenlik simülasyonu/test raporunu calistirir (Yalnizca Sunucu Sahibi).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
