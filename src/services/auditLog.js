@@ -1,6 +1,6 @@
 async function findExecutor(guild, type, targetId = null, maxAgeMs = 12000) {
   try {
-    const logs = await guild.fetchAuditLogs({ type, limit: 8 });
+    const logs = await guild.fetchAuditLogs({ type, limit: 10 });
     const now = Date.now();
     const candidates = logs.entries
       .filter((entry) => {
