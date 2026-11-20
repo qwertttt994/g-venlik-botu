@@ -1,8 +1,13 @@
 {
-  "name": "sunucu-guvenlik-botu",
-  "version": "1.0.0",
+  "name": "g-venlik-botu",
+  "version": "2.0.0",
+  "description": "8K+ Official Security & Moderation Core System",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
+    "better-sqlite3": "^11.5.0",
     "discord.js": "^14.16.3"
   }
 }
