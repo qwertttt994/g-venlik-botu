@@ -12,16 +12,21 @@ function createLogger(client) {
     console.error(`[ERROR][${context}]`, formatError(err), meta);
   }
 
+  function logWarn(context, message, meta = {}) {
+    console.warn(`[WARN][${context}] ${message}`, meta);
+  }
+
   function logInfo(context, message) {
     console.log(`[INFO][${context}] ${message}`);
   }
 
   async function sendEmbed(guild, embed) {
-    if (!guild || !config.logChannelId) return false;
+    const targetGuild = guild || client?.guilds?.cache?.get(config.guildId);
+    if (!targetGuild || !config.logChannelId) return false;
     try {
       const channel =
-        guild.channels.cache.get(config.logChannelId) ||
-        (await guild.channels.fetch(config.logChannelId));
+        targetGuild.channels.cache.get(config.logChannelId) ||
+        (await targetGuild.channels.fetch(config.logChannelId));
       if (!channel || !channel.isTextBased()) {
         logError('LOGGER', new Error('Log kanali metin kanali degil veya bulunamadi'), {
           channelId: config.logChannelId,
@@ -45,7 +50,7 @@ function createLogger(client) {
     return sendEmbed(guild, embed);
   }
 
-  return { logError, logInfo, sendEmbed, sendSystemAlert, formatError };
+  return { logError, logWarn, logInfo, sendEmbed, sendSystemAlert, formatError };
 }
 
 module.exports = { createLogger, formatError };
