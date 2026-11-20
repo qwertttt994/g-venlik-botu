@@ -21,12 +21,11 @@ function createLogger(client) {
   }
 
   async function sendEmbed(guild, embed) {
-    const targetGuild = guild || client?.guilds?.cache?.get(config.guildId);
-    if (!targetGuild || !config.logChannelId) return false;
+    if (!guild || !config.logChannelId) return false;
     try {
       const channel =
-        targetGuild.channels.cache.get(config.logChannelId) ||
-        (await targetGuild.channels.fetch(config.logChannelId));
+        guild.channels.cache.get(config.logChannelId) ||
+        (await guild.channels.fetch(config.logChannelId));
       if (!channel || !channel.isTextBased()) {
         logError('LOGGER', new Error('Log kanali metin kanali degil veya bulunamadi'), {
           channelId: config.logChannelId,
@@ -50,7 +49,7 @@ function createLogger(client) {
     return sendEmbed(guild, embed);
   }
 
-  return { logError, logWarn, logInfo, sendEmbed, sendSystemAlert, formatError };
+  return { client, logError, logWarn, logInfo, sendEmbed, sendSystemAlert, formatError };
 }
 
 module.exports = { createLogger, formatError };
