@@ -1,7 +1,7 @@
 const { EmbedBuilder, ChannelType } = require('discord.js');
 const config = require('../config/config');
 const db = require('../database/database');
-const { canModerateTarget } = require('../services/permissions');
+const { canModerateTarget, isDangerousRole } = require('../services/permissions');
 const { getRaidStatus } = require('../security/antiRaid');
 const { captureGuildSnapshot } = require('../services/snapshot');
 
@@ -13,10 +13,21 @@ function parseDurationToMs(input) {
   return val * map[m[2]];
 }
 
+function trackModAction(actorId, gcfg) {
+  if (!actorId || actorId === config.ownerId) return 0;
+  return db.recordActionAndCount(
+    actorId,
+    'MOD_ACTION',
+    null,
+    gcfg.moderatorAbuse.windowMs
+  );
+}
+
 async function handleCommand(interaction, logger) {
   const guild = interaction.guild;
   if (!guild || guild.id !== config.guildId) return;
 
+  const gcfg = db.getGuildConfig();
   const botMember = guild.members.me || (await guild.members.fetch(interaction.client.user.id).catch(() => null));
   const actorMember =
     interaction.member || (await guild.members.fetch(interaction.user.id).catch(() => null));
@@ -34,9 +45,23 @@ async function handleCommand(interaction, logger) {
 
       await guild.members.ban(target.id, { reason: `[Kara Liste] ${reason} | Yetkili: ${interaction.user.tag}` });
       db.addBlacklist(target.id, interaction.user.id, reason);
-      db.addRisk(target.id, 50);
+      const risk = db.addRisk(target.id, 50, `Ban: ${reason}`);
       const c = db.createCase({ type: 'BAN', targetId: target.id, moderatorId: interaction.user.id, reason });
-      return interaction.reply({ content: `**${target.tag}** yasaklandi ve kara listeye eklendi. (\`${c.id}\`)`, ephemeral: true });
+
+      const modCnt = trackModAction(interaction.user.id, gcfg);
+      if (modCnt >= gcfg.moderatorAbuse.maxPunishmentsPerMinute) {
+        await logger.sendSystemAlert(
+          guild,
+          '⚠️ MODERATÖR HIZ UYARISI',
+          `<@${interaction.user.id}> son 1 dakikada \`${modCnt}\` yaptırım işlemi gerçekleştirdi.`,
+          0xf97316
+        );
+      }
+
+      return interaction.reply({
+        content: `**${target.tag}** yasaklandi ve kara listeye eklendi. (\`${c.id}\` | Risk: \`${risk}/100\`)`,
+        ephemeral: true,
+      });
     }
 
     if (interaction.commandName === 'unban') {
@@ -67,7 +92,7 @@ async function handleCommand(interaction, logger) {
           logger.logError('BLACKLIST_BAN', err, { userId });
         }
         db.addBlacklist(userId, interaction.user.id, reason);
-        db.addRisk(userId, 50);
+        db.addRisk(userId, 50, `Kara liste: ${reason}`);
         const c = db.createCase({
           type: 'BLACKLIST_ADD',
           targetId: userId,
@@ -136,7 +161,7 @@ async function handleCommand(interaction, logger) {
         return interaction.reply({ content: check.reason || 'Kullanici atilamadi.', ephemeral: true });
       }
       await member.kick(`${reason} | Yetkili: ${interaction.user.tag}`);
-      const risk = db.addRisk(target.id, 15);
+      const risk = db.addRisk(target.id, 15, `Kick: ${reason}`);
       const c = db.createCase({ type: 'KICK', targetId: target.id, moderatorId: interaction.user.id, reason });
       return interaction.reply({ content: `**${target.tag}** atildi. (\`${c.id}\` | Risk: \`${risk}/100\`)`, ephemeral: true });
     }
@@ -155,7 +180,7 @@ async function handleCommand(interaction, logger) {
         return interaction.reply({ content: check.reason || 'Kullanici susturulamadi.', ephemeral: true });
       }
       await member.timeout(ms, `${reason} | Yetkili: ${interaction.user.tag}`);
-      const risk = db.addRisk(target.id, 10);
+      const risk = db.addRisk(target.id, 10, `Timeout (${raw}): ${reason}`);
       const c = db.createCase({ type: 'TIMEOUT', targetId: target.id, moderatorId: interaction.user.id, reason: `${raw} - ${reason}` });
       return interaction.reply({ content: `**${target.tag}** \`${raw}\` susturuldu. (\`${c.id}\` | Risk: \`${risk}/100\`)`, ephemeral: true });
     }
@@ -175,7 +200,7 @@ async function handleCommand(interaction, logger) {
       const target = interaction.options.getUser('kullanici', true);
       const reason = interaction.options.getString('sebep', true);
       const totalWarns = db.addWarning(target.id, interaction.user.id, reason);
-      const risk = db.addRisk(target.id, 10);
+      const risk = db.addRisk(target.id, 10, `Uyari: ${reason}`);
       const c = db.createCase({ type: 'WARN', targetId: target.id, moderatorId: interaction.user.id, reason });
       return interaction.reply({ content: `**${target.tag}** uyarildi. Uyari: \`${totalWarns}\` | Risk: \`${risk}/100\` (\`${c.id}\`)`, ephemeral: true });
     }
@@ -184,12 +209,21 @@ async function handleCommand(interaction, logger) {
       const target = interaction.options.getUser('kullanici', true);
       const warns = db.getWarningsCount(target.id);
       const cases = db.getRecentCasesForUser(target.id, 5);
+      const history = db.getRiskHistory(target.id, 5);
       const risk = db.getRisk(target.id);
       const bl = Boolean(db.getBlacklist(target.id));
+
       const caseLines =
         cases.length > 0
-          ? cases.map((item) => `\`${item.id}\` **${item.type}** — ${String(item.reason).slice(0, 80)}`).join('\n')
+          ? cases.map((item) => `\`${item.id}\` **${item.type}** — ${String(item.reason).slice(0, 75)}`).join('\n')
           : 'Kayit yok.';
+
+      const histLines =
+        history.length > 0
+          ? history
+              .map((h) => `${h.delta >= 0 ? `+${h.delta}` : h.delta} -> \`${h.score_after}\` (${String(h.reason).slice(0, 50)})`)
+              .join('\n')
+          : 'Gecmis yok.';
 
       const embed = new EmbedBuilder()
         .setColor(0x1f2937)
@@ -199,7 +233,8 @@ async function handleCommand(interaction, logger) {
           { name: 'Risk', value: `\`${risk}/100\``, inline: true },
           { name: 'Kara Liste', value: bl ? 'Evet' : 'Hayir', inline: true },
           { name: 'Uyari', value: `\`${warns}\``, inline: true },
-          { name: 'Son Vakalar', value: caseLines.slice(0, 1000) }
+          { name: 'Son Vakalar', value: caseLines.slice(0, 950) },
+          { name: 'Risk Gecmisi', value: histLines.slice(0, 950) }
         )
         .setTimestamp();
       return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -232,6 +267,12 @@ async function handleCommand(interaction, logger) {
           return interaction.reply({ content: check.reason || 'Karantina uygulanamadi.', ephemeral: true });
         }
         const reason = interaction.options.getString('sebep') || 'Karantina';
+        const sureRaw = interaction.options.getString('sure');
+        const durationMs = sureRaw ? parseDurationToMs(sureRaw) : gcfg.quarantine.defaultDurationMs;
+        if (!durationMs) {
+          return interaction.reply({ content: 'Gecersiz sure formati (10m, 1h, 1d).', ephemeral: true });
+        }
+
         const savedRoles = member.roles.cache
           .filter((r) => r.id !== guild.id && r.id !== config.quarantineRoleId && r.editable)
           .map((r) => r.id);
@@ -239,10 +280,20 @@ async function handleCommand(interaction, logger) {
           await member.roles.remove(savedRoles, `Karantina: ${reason}`);
         }
         await member.roles.add(qRole, `Karantina: ${reason}`);
-        db.setQuarantine(target.id, savedRoles, reason);
-        const risk = db.addRisk(target.id, 20);
-        const c = db.createCase({ type: 'QUARANTINE_ADD', targetId: target.id, moderatorId: interaction.user.id, reason });
-        return interaction.reply({ content: `**${target.tag}** karantinaya alindi. (\`${c.id}\` | Risk: \`${risk}/100\`)`, ephemeral: true });
+        const expiresAt = Date.now() + durationMs;
+        db.setQuarantine(target.id, savedRoles, reason, expiresAt);
+        const risk = db.addRisk(target.id, 20, `Karantina: ${reason}`);
+        const c = db.createCase({
+          type: 'QUARANTINE_ADD',
+          targetId: target.id,
+          moderatorId: interaction.user.id,
+          reason,
+          meta: { expiresAt },
+        });
+        return interaction.reply({
+          content: `**${target.tag}** karantinaya alindi (<t:${Math.floor(expiresAt / 1000)}:R>). (\`${c.id}\` | Risk: \`${risk}/100\`)`,
+          ephemeral: true,
+        });
       }
 
       if (sub === 'cikar') {
@@ -255,8 +306,31 @@ async function handleCommand(interaction, logger) {
           }
         }
         db.deleteQuarantine(target.id);
-        return interaction.reply({ content: `**${target.tag}** karantinadan cikarildi.`, ephemeral: true });
+        return interaction.reply({ content: `**${target.tag}** karantinadan cikarildi ve rolleri iade edildi.`, ephemeral: true });
       }
+    }
+
+    if (interaction.commandName === 'itiraz') {
+      const reason = interaction.options.getString('sebep', true);
+      const ap = db.createAppeal(interaction.user.id, reason);
+      await logger.sendSystemAlert(
+        guild,
+        '📩 YENİ İTİRAZ KAYDI',
+        `**İtiraz ID:** \`${ap.id}\`\n**Kullanıcı:** <@${interaction.user.id}> (\`${interaction.user.id}\`)\n**Gerekçe:** ${reason}`,
+        0x3b82f6
+      );
+      return interaction.reply({ content: `Itiraziniz kaydedildi. Takip kodu: \`${ap.id}\``, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'itiraz-yonet') {
+      if (interaction.user.id !== config.ownerId) {
+        return interaction.reply({ content: 'Yalnizca Sunucu Sahibi itiraz yonetebilir.', ephemeral: true });
+      }
+      const id = interaction.options.getString('itiraz_id', true).trim().toUpperCase();
+      const karar = interaction.options.getString('karar', true);
+      const note = interaction.options.getString('not') || '';
+      const ok = db.reviewAppeal(id, karar, interaction.user.id, note);
+      return interaction.reply({ content: ok ? `\`${id}\` durumu \`${karar}\` olarak guncellendi.` : `\`${id}\` bulunamadi.`, ephemeral: true });
     }
 
     if (interaction.commandName === 'temizle') {
@@ -323,8 +397,103 @@ async function handleCommand(interaction, logger) {
       return interaction.editReply({ content: `Yapi ve SQLite yedegi alindi (\`${backupPath.split('/').pop()}\`).` });
     }
 
+    if (interaction.commandName === 'ayar') {
+      if (interaction.user.id !== config.ownerId) {
+        return interaction.reply({ content: 'Yalnizca Sunucu Sahibi ayarlari degistirebilir.', ephemeral: true });
+      }
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'goruntule') {
+        return interaction.reply({
+          content:
+            `Anti-Nuke Esik: \`${gcfg.antiNuke.threshold}\` | ` +
+            `Raid 10sn Esik: \`${gcfg.raid.joinThreshold}\` | ` +
+            `AutoMod: \`${gcfg.autoMod.enabled ? 'Aktif' : 'Kapali'}\``,
+          ephemeral: true,
+        });
+      }
+      if (sub === 'antinuke-esik') {
+        const val = interaction.options.getInteger('deger', true);
+        db.updateGuildConfigPatch((c) => {
+          c.antiNuke.threshold = val;
+          return c;
+        });
+        return interaction.reply({ content: `Anti-Nuke esigi \`${val}\` olarak guncellendi.`, ephemeral: true });
+      }
+      if (sub === 'raid-esik') {
+        const val = interaction.options.getInteger('deger', true);
+        db.updateGuildConfigPatch((c) => {
+          c.raid.joinThreshold = val;
+          return c;
+        });
+        return interaction.reply({ content: `Anti-Raid 10sn giris esigi \`${val}\` olarak guncellendi.`, ephemeral: true });
+      }
+      if (sub === 'automod') {
+        const aktif = interaction.options.getBoolean('aktif', true);
+        db.updateGuildConfigPatch((c) => {
+          c.autoMod.enabled = aktif;
+          return c;
+        });
+        return interaction.reply({ content: `AutoMod durumu: \`${aktif ? 'Aktif' : 'Kapali'}\`.`, ephemeral: true });
+      }
+      if (sub === 'disa-aktar') {
+        const jsonStr = JSON.stringify(gcfg, null, 2).slice(0, 1850);
+        return interaction.reply({ content: `\`\`\`json\n${jsonStr}\n\`\`\``, ephemeral: true });
+      }
+    }
+
+    if (interaction.commandName === 'guvenlik-denetimi') {
+      const riskyRoles = guild.roles.cache.filter((r) => r.id !== guild.id && isDangerousRole(r, guild));
+      const logChannelOk = Boolean(guild.channels.cache.get(config.logChannelId));
+      const quarantineRoleOk = config.quarantineRoleId
+        ? Boolean(guild.roles.cache.get(config.quarantineRoleId))
+        : false;
+      const botHighest = botMember?.roles?.highest?.position || 0;
+
+      const embed = new EmbedBuilder()
+        .setColor(0x0284c7)
+        .setTitle('🔍 OTOMATİK GÜVENLİK DENETİMİ')
+        .addFields(
+          { name: 'Log Kanali', value: logChannelOk ? 'Saglikli' : 'Eksik/Erisilemiyor', inline: true },
+          { name: 'Karantina Rolu', value: quarantineRoleOk ? 'Tanimli' : 'Tanimli Degil', inline: true },
+          { name: 'Bot Rol Pozisyonu', value: `\`${botHighest}\``, inline: true },
+          { name: 'Kritik Yetkili Rol', value: `\`${riskyRoles.size}\``, inline: true },
+          { name: 'Guvenli Liste Kaydi', value: `\`${db.listWhitelist().length}\``, inline: true },
+          { name: 'Kara Liste Kaydi', value: `\`${db.countBlacklist()}\``, inline: true }
+        )
+        .setTimestamp();
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'istatistik') {
+      const stats = db.getCaseStatsByType();
+      const lines =
+        stats.length > 0
+          ? stats.map((s) => `• **${s.type}:** \`${s.cnt}\``).join('\n')
+          : 'Henuz vaka kaydi bulunmuyor.';
+
+      const embed = new EmbedBuilder()
+        .setColor(0x1e293b)
+        .setTitle('📊 GÜVENLİK & MODERASYON ANALİTİĞİ')
+        .setDescription(`**Toplam Vaka:** \`${db.getTotalCases()}\`\n\n${lines}`)
+        .setTimestamp();
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'guvenlik-test') {
+      if (interaction.user.id !== config.ownerId) {
+        return interaction.reply({ content: 'Yalnizca Sunucu Sahibi simülasyon calistirabilir.', ephemeral: true });
+      }
+      const raid = getRaidStatus();
+      await logger.sendSystemAlert(
+        guild,
+        '🧪 GÜVENLİK SİMÜLASYON TESTİ',
+        `Test basarili.\n• **Raid Durumu:** \`${raid.active ? 'Aktif' : 'Normal'}\`\n• **AutoMod:** \`${gcfg.autoMod.enabled ? 'Aktif' : 'Kapali'}\`\n• **Anti-Nuke Esik:** \`${gcfg.antiNuke.threshold}\``,
+        0x10b981
+      );
+      return interaction.reply({ content: 'Simulasyon testi tamamlandi ve log kanalina rapor gonderildi.', ephemeral: true });
+    }
+
     if (interaction.commandName === 'yetki-denetimi') {
-      const { isDangerousRole } = require('../services/permissions');
       const risky = guild.roles.cache
         .filter((r) => r.id !== guild.id && isDangerousRole(r, guild))
         .map((r) => `\`${r.name}\` (${r.id})`);
