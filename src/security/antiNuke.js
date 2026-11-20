@@ -1,6 +1,7 @@
 const { EmbedBuilder } = require('discord.js');
 const config = require('../config/config');
 const {
+  getGuildConfig,
   recordActionAndCount,
   addRisk,
   createCase,
@@ -30,8 +31,13 @@ async function handleAntiNuke(client, guild, executorId, actionType, targetId, s
   if (!executorId || executorId === config.ownerId || executorId === client.user.id) return false;
   if (isWhitelisted(executorId, guild)) return false;
 
-  const count = recordActionAndCount(executorId, actionType, targetId, config.antiNuke.windowMs);
-  if (count < config.antiNuke.threshold) return false;
+  const gcfg = getGuildConfig();
+  const windowMs = gcfg.antiNuke.windowMs;
+  const threshold = gcfg.antiNuke.threshold;
+  const cooldownMs = gcfg.antiNuke.cooldownMs;
+
+  const count = recordActionAndCount(executorId, actionType, targetId, windowMs);
+  if (count < threshold) return false;
 
   const cooldowns = getState(COOLDOWN_KEY, {});
   const cdKey = `${executorId}:${actionType}`;
@@ -39,7 +45,7 @@ async function handleAntiNuke(client, guild, executorId, actionType, targetId, s
   if (cooldowns[cdKey] && now < cooldowns[cdKey]) {
     return false;
   }
-  cooldowns[cdKey] = now + config.antiNuke.cooldownMs;
+  cooldowns[cdKey] = now + cooldownMs;
   setState(COOLDOWN_KEY, cooldowns);
 
   const member = await guild.members.fetch(executorId).catch((err) => {
@@ -50,16 +56,16 @@ async function handleAntiNuke(client, guild, executorId, actionType, targetId, s
   const removedRoles = await isolateDangerousRoles(
     member,
     guild,
-    `Anti-Nuke: ${actionType} esigi (${config.antiNuke.threshold}) asildi`,
+    `Anti-Nuke: ${actionType} esigi (${threshold}) asildi`,
     logger
   );
 
-  const risk = addRisk(executorId, 35);
+  const risk = addRisk(executorId, 35, `Anti-Nuke: ${actionType}`);
   const caseEntry = createCase({
     type: 'ANTI_NUKE',
     targetId: targetId || executorId,
     moderatorId: client.user.id,
-    reason: `${summary} (${count} islem / ${config.antiNuke.windowMs / 1000}s)`,
+    reason: `${summary} (${count} islem / ${Math.round(windowMs / 1000)}s)`,
     meta: { executorId, actionType, removedRoles, ...extraMeta },
   });
 
