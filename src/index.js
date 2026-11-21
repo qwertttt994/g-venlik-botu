@@ -18,6 +18,7 @@ const {
   restoreDeletedChannel,
   restoreDeletedRole,
 } = require('./services/snapshot');
+const { isAuthorized, buildOverview, renderDashboardHtml } = require('./services/dashboard');
 const { handleAntiNuke } = require('./security/antiNuke');
 const { evaluateMemberJoin, evaluateVoiceBurst } = require('./security/antiRaid');
 const { handleAutoMod } = require('./security/autoMod');
@@ -41,7 +42,9 @@ const logger = createLogger(client);
 
 http
   .createServer((req, res) => {
-    if (req.url === '/health') {
+    const parsedUrl = new URL(req.url, `http://localhost:${config.port}`);
+
+    if (parsedUrl.pathname === '/health') {
       const ready = Boolean(client.isReady() && client.user);
       res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
@@ -53,6 +56,29 @@ http
           timestamp: Date.now(),
         })
       );
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/overview') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(buildOverview(client)));
+      return;
+    }
+
+    if (parsedUrl.pathname === '/dashboard') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('401 Unauthorized');
+        return;
+      }
+      const tokenParam = parsedUrl.searchParams.get('token') || '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(renderDashboardHtml(tokenParam));
       return;
     }
 
@@ -134,6 +160,16 @@ client.on('messageCreate', async (message) => {
   await handleAutoMod(message, logger);
 });
 
+client.on('messageDeleteBulk', async (messages, channel) => {
+  if (!channel.guild || channel.guild.id !== config.guildId) return;
+  await logger.sendSystemAlert(
+    channel.guild,
+    '🧹 TOPLU MESAJ SİLME',
+    `**Kanal:** <#${channel.id}> | **Adet:** \`${messages.size}\``,
+    0x64748b
+  );
+});
+
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!newState.guild || newState.guild.id !== config.guildId) return;
   if (!oldState.channelId && newState.channelId) {
@@ -146,13 +182,14 @@ client.on('guildBanRemove', async (ban) => {
   if (guild.id !== config.guildId) return;
 
   const bl = db.getBlacklist(ban.user.id);
+  const ipFlag = db.isIpBannedForUserOrTag(ban.user.id, `UID-${ban.user.id}`);
   const executor = await findExecutor(guild, AuditLogEvent.MemberBanRemove, ban.user.id);
 
-  if (bl && (!executor || executor.id !== config.ownerId)) {
+  if ((bl || ipFlag) && (!executor || executor.id !== config.ownerId)) {
     let reBanned = false;
     try {
       await guild.members.ban(ban.user.id, {
-        reason: 'Anti-Unban: Kara listedeki kullanicinin yasagi yetkisiz kaldirildi.',
+        reason: 'Anti-Unban: Kara liste / IP izolasyonundaki kullanicinin yasagi yetkisiz kaldirildi.',
       });
       reBanned = true;
     } catch (err) {
@@ -165,7 +202,7 @@ client.on('guildBanRemove', async (ban) => {
       .setDescription(
         `**Hedef:** ${ban.user.tag} (\`${ban.user.id}\`) | **Geri Ban:** \`${reBanned ? 'Evet' : 'Hayır'}\`\n` +
           `**Kaldıran:** ${executor ? `${executor.tag} (\`${executor.id}\`)` : 'Bilinmiyor'}\n` +
-          `**İlk Sebep:** ${bl.reason}`
+          `**Sebep:** ${bl?.reason || 'IP / Ag Izolasyonu'}`
       )
       .setTimestamp();
     await logger.sendEmbed(guild, embed);
@@ -188,19 +225,22 @@ client.on('guildMemberAdd', async (member) => {
   if (member.guild.id !== config.guildId) return;
 
   const bl = db.getBlacklist(member.id);
-  if (bl) {
+  const ipFlag = db.isIpBannedForUserOrTag(member.id, `UID-${member.id}`);
+  if (bl || ipFlag) {
     let banned = false;
     try {
-      await member.ban({ reason: `Kara Liste Korumasi: ${bl.reason}` });
+      await member.ban({
+        reason: ipFlag ? 'IP / Ag Izolasyonu Aktif' : `Kara Liste Korumasi: ${bl.reason}`,
+      });
       banned = true;
     } catch (err) {
       logger.logError('BLACKLIST_MEMBER_ADD_BAN', err, { userId: member.id });
     }
     const embed = new EmbedBuilder()
       .setColor(0xef4444)
-      .setTitle('⛔ KARA LİSTE GİRİŞİ')
+      .setTitle(ipFlag ? '🚫 IP / AĞ İZOLASYONU GİRİŞİ' : '⛔ KARA LİSTE GİRİŞİ')
       .setDescription(
-        `**Üye:** ${member.user.tag} (\`${member.id}\`) | **Yasaklandı:** \`${banned ? 'Evet' : 'Hayır'}\`\n**Sebep:** ${bl.reason}`
+        `**Üye:** ${member.user.tag} (\`${member.id}\`) | **Yasaklandı:** \`${banned ? 'Evet' : 'Hayır'}\`\n**Sebep:** ${ipFlag ? 'IP / Ag Izolasyonu' : bl.reason}`
       )
       .setTimestamp();
     await logger.sendEmbed(member.guild, embed);
@@ -471,6 +511,26 @@ client.on('threadDelete', async (thread) => {
       0x64748b
     );
   }
+});
+
+client.on('guildScheduledEventCreate', async (event) => {
+  if (!event.guild || event.guild.id !== config.guildId) return;
+  await logger.sendSystemAlert(
+    event.guild,
+    '📅 YENİ ETKİNLİK OLUŞTURULDU',
+    `**Etkinlik:** \`${event.name}\``,
+    0x3b82f6
+  );
+});
+
+client.on('guildScheduledEventDelete', async (event) => {
+  if (!event.guild || event.guild.id !== config.guildId) return;
+  await logger.sendSystemAlert(
+    event.guild,
+    '🗑️ ETKİNLİK SİLİNDİ',
+    `**Etkinlik:** \`${event.name}\``,
+    0x64748b
+  );
 });
 
 client.login(config.token).catch((err) => {
