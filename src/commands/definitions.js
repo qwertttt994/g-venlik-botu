@@ -6,7 +6,21 @@ const commands = [
     .setDescription('Kullaniciyi yasaklar, vaka olusturur ve kara listeye ekler.')
     .addUserOption((o) => o.setName('kullanici').setDescription('Yasaklanacak kullanici').setRequired(true))
     .addStringOption((o) => o.setName('sebep').setDescription('Sebep').setRequired(false))
+    .addBooleanOption((o) => o.setName('ip_ban').setDescription('IP/Ag izolasyon kaydi da eklensin mi?').setRequired(false))
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
+
+  new SlashCommandBuilder()
+    .setName('ip-ban')
+    .setDescription('Kullanici veya ag etiketi icin IP/Ag izolasyonu uygular ve yasaklar (Yalnizca Sunucu Sahibi).')
+    .addStringOption((o) => o.setName('hedef').setDescription('Kullanici ID veya Ag etiketi').setRequired(true))
+    .addStringOption((o) => o.setName('sebep').setDescription('Sebep').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('ip-unban')
+    .setDescription('IP/Ag izolasyon kaydini kaldirir (Yalnizca Sunucu Sahibi).')
+    .addStringOption((o) => o.setName('hedef').setDescription('Kullanici ID veya Ag etiketi').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName('unban')
@@ -203,6 +217,17 @@ const commands = [
         .addBooleanOption((o) => o.setName('aktif').setDescription('true/false').setRequired(true))
     )
     .addSubcommand((s) => s.setName('disa-aktar').setDescription('Canli ayarlari JSON olarak verir.'))
+    .addSubcommand((s) =>
+      s
+        .setName('ice-aktar')
+        .setDescription('JSON formatinda ayarlari ice aktarir.')
+        .addStringOption((o) => o.setName('json').setDescription('JSON metni').setRequired(true))
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('80 basamakli güvenlik ve web dashboard özet panelini açar.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
