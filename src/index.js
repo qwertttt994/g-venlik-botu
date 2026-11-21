@@ -20,7 +20,7 @@ const {
 } = require('./services/snapshot');
 const { isAuthorized, buildOverview, renderDashboardHtml } = require('./services/dashboard');
 const { handleAntiNuke } = require('./security/antiNuke');
-const { evaluateMemberJoin, evaluateVoiceBurst } = require('./security/antiRaid');
+const { evaluateMemberJoin, evaluateVoiceBurst, activateRaidShield } = require('./security/antiRaid');
 const { handleAutoMod } = require('./security/autoMod');
 const { commands } = require('./commands/definitions');
 const { handleCommand } = require('./commands/handler');
@@ -39,6 +39,22 @@ const client = new Client({
 });
 
 const logger = createLogger(client);
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body || '{}'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
 
 http
   .createServer((req, res) => {
@@ -76,13 +92,8 @@ http
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
       }
-      let body = '';
-      req.on('data', (chunk) => {
-        body += chunk.toString();
-      });
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}');
+      readJsonBody(req)
+        .then((parsed) => {
           db.updateGuildConfigPatch((c) => {
             if (typeof parsed.antiNukeThreshold === 'number') {
               c.antiNuke.threshold = Math.max(1, Math.min(20, parsed.antiNukeThreshold));
@@ -97,11 +108,93 @@ http
           });
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: true }));
-        } catch {
+        })
+        .catch(() => {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ error: 'Gecersiz JSON' }));
-        }
-      });
+        });
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/raid' && req.method === 'POST') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      readJsonBody(req)
+        .then(async (parsed) => {
+          const guild = client.guilds.cache.get(config.guildId);
+          if (parsed.active) {
+            if (guild) await activateRaidShield(guild, 'Panel üzerinden manuel Raid kalkanı açıldı', logger);
+            else db.setState('raid_state', { active: true, until: Date.now() + 600000, reason: 'Panel' });
+          } else {
+            db.setState('raid_state', { active: false, until: 0, reason: null });
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true }));
+        })
+        .catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Gecersiz JSON' }));
+        });
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/ipban' && req.method === 'POST') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      readJsonBody(req)
+        .then(async (parsed) => {
+          const target = String(parsed.target || '').trim();
+          const reason = String(parsed.reason || 'Panel IP/Ağ izolasyonu').trim();
+          if (!target) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Hedef gerekli' }));
+            return;
+          }
+          if (parsed.action === 'remove') {
+            db.removeIpBanByTarget(target);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          const isSnowflake = /^\d{17,20}$/.test(target);
+          if (isSnowflake && target === config.ownerId) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Sunucu sahibine işlem yapılamaz' }));
+            return;
+          }
+          if (isSnowflake) {
+            const guild = client.guilds.cache.get(config.guildId);
+            if (guild) {
+              await guild.members.ban(target, { reason: `[Panel IP-BAN] ${reason}` }).catch(() => null);
+            }
+            db.addBlacklist(target, config.ownerId, `[IP-BAN] ${reason}`);
+            db.addRisk(target, 80, `Panel IP-Ban: ${reason}`);
+          }
+          db.addIpBan({
+            userId: isSnowflake ? target : null,
+            networkTag: isSnowflake ? `UID-${target}` : target,
+            reason,
+            bannedBy: config.ownerId,
+          });
+          db.createCase({
+            type: 'IP_BAN',
+            targetId: target,
+            moderatorId: config.ownerId,
+            reason,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true }));
+        })
+        .catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Gecersiz istek' }));
+        });
       return;
     }
 
