@@ -14,6 +14,7 @@ module.exports = {
   guildId: process.env.GUILD_ID,
   ownerId: process.env.OWNER_ID,
   logChannelId: process.env.LOG_CHANNEL_ID,
+  dashboardToken: process.env.DASHBOARD_TOKEN || null,
   verifiedRoleId: process.env.VERIFIED_ROLE_ID || null,
   quarantineRoleId: process.env.QUARANTINE_ROLE_ID || null,
   port: Number(process.env.PORT || 3000),
