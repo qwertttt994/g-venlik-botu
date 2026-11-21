@@ -1,6 +1,7 @@
 const config = require('../config/config');
 const db = require('../database/database');
 const { getRaidStatus } = require('../security/antiRaid');
+const { getAdaptiveState } = require('../security/adaptiveSecurity');
 
 const RULES_80 = [
   '01. Kanal silme eşik ve patlama tespiti',
@@ -110,6 +111,7 @@ function getRecentIpBans(limit = 20) {
 function buildOverview(client) {
   const guild = client.guilds.cache.get(config.guildId);
   const raid = getRaidStatus();
+  const adaptive = getAdaptiveState();
   const gcfg = db.getGuildConfig();
   return {
     botReady: Boolean(client.isReady() && client.user),
@@ -120,6 +122,7 @@ function buildOverview(client) {
     guildId: config.guildId,
     memberCount: guild?.memberCount || null,
     raid,
+    adaptive,
     counts: {
       cases: db.getTotalCases(),
       blacklist: db.countBlacklist(),
@@ -144,7 +147,7 @@ function renderDashboardHtml(tokenParam = '') {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SENTINEL SOC — 80/80 Güvenlik Kontrol Merkezi</title>
+  <title>SENTINEL SOC NIRVANA — 80/80 Güvenlik Kontrol Merkezi</title>
   <style>
     :root {
       --bg: #050811;
@@ -157,6 +160,7 @@ function renderDashboardHtml(tokenParam = '') {
       --accent-2: #38bdf8;
       --danger: #ef4444;
       --ok: #10b981;
+      --purple: #a855f7;
     }
     * { box-sizing: border-box; }
     body {
@@ -197,7 +201,6 @@ function renderDashboardHtml(tokenParam = '') {
       cursor: pointer;
       font-size: 13px;
       font-weight: 600;
-      transition: 0.15s;
     }
     .nav-btn:hover { background: var(--panel-2); color: #fff; }
     .nav-btn.active { background: #0ea5e91f; border-color: #0ea5e966; color: var(--accent-2); }
@@ -217,7 +220,7 @@ function renderDashboardHtml(tokenParam = '') {
     .btn-group { display: flex; flex-wrap: wrap; gap: 8px; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
       gap: 12px;
       margin-bottom: 20px;
     }
@@ -232,6 +235,7 @@ function renderDashboardHtml(tokenParam = '') {
     .v { font-size: 22px; font-weight: 800; margin-top: 6px; color: #f8fafc; }
     .badge-ok { color: var(--ok); }
     .badge-warn { color: var(--danger); }
+    .badge-pur { color: var(--purple); }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -305,7 +309,7 @@ function renderDashboardHtml(tokenParam = '') {
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand">🛡️ SENTINEL SOC • 80/80</div>
+    <div class="brand">🛡️ SENTINEL NIRVANA • 80/80</div>
     <button class="nav-btn active" data-tab="overview">Genel Bakış</button>
     <button class="nav-btn" data-tab="cases">Vakalar & Analitik</button>
     <button class="nav-btn" data-tab="lists">Kara Liste & IP İzolasyon</button>
@@ -327,7 +331,7 @@ function renderDashboardHtml(tokenParam = '') {
     <div id="appContent">
       <div class="topbar">
         <div>
-          <h1 class="title">Güvenlik Kontrol Paneli</h1>
+          <h1 class="title">Güvenlik Kontrol Merkezi</h1>
           <div class="meta" id="metaLine">Bağlanıyor...</div>
         </div>
         <div class="btn-group">
@@ -565,7 +569,7 @@ function renderDashboardHtml(tokenParam = '') {
         ['IP / Ağ İzolasyonu', d.counts.ipBans, ''],
         ['Güvenli Liste', d.counts.whitelist, ''],
         ['Raid Kalkanı', d.raid.active ? 'AKTİF' : 'Normal', d.raid.active ? 'badge-warn' : 'badge-ok'],
-        ['AutoMod', d.config.autoMod.enabled ? 'Aktif' : 'Kapalı', d.config.autoMod.enabled ? 'badge-ok' : ''],
+        ['Adaptif Mod', d.adaptive?.elevated ? 'YÜKSEK' : 'Standart', d.adaptive?.elevated ? 'badge-pur' : 'badge-ok'],
       ];
       document.getElementById('statCards').innerHTML = cards
         .map(([k, v, cls]) => '<div class="card"><div class="k">' + k + '</div><div class="v ' + cls + '">' + v + '</div></div>')
