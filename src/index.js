@@ -20,7 +20,12 @@ const {
 } = require('./services/snapshot');
 const { isAuthorized, buildOverview, renderDashboardHtml } = require('./services/dashboard');
 const { handleAntiNuke } = require('./security/antiNuke');
-const { evaluateMemberJoin, evaluateVoiceBurst, activateRaidShield } = require('./security/antiRaid');
+const {
+  evaluateMemberJoin,
+  evaluateVoiceBurst,
+  activateRaidShield,
+  isImpersonationAttempt,
+} = require('./security/antiRaid');
 const { handleAutoMod } = require('./security/autoMod');
 const { commands } = require('./commands/definitions');
 const { handleCommand } = require('./commands/handler');
@@ -190,6 +195,81 @@ http
           });
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: true }));
+        })
+        .catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Gecersiz istek' }));
+        });
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/whitelist' && req.method === 'POST') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      readJsonBody(req)
+        .then((parsed) => {
+          const targetId = String(parsed.targetId || '').trim();
+          if (!targetId) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'ID gerekli' }));
+            return;
+          }
+          if (parsed.action === 'remove') {
+            const ok = db.removeWhitelist(targetId);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok }));
+            return;
+          }
+          const targetType = parsed.targetType === 'role' ? 'role' : 'user';
+          db.addWhitelist(targetId, targetType, config.ownerId);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true }));
+        })
+        .catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Gecersiz istek' }));
+        });
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/case-delete' && req.method === 'POST') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      readJsonBody(req)
+        .then((parsed) => {
+          const ok = db.deleteCaseById(parsed.caseId || '');
+          res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok }));
+        })
+        .catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Gecersiz istek' }));
+        });
+      return;
+    }
+
+    if (parsedUrl.pathname === '/api/appeal' && req.method === 'POST') {
+      if (!isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      readJsonBody(req)
+        .then((parsed) => {
+          const ok = db.reviewAppeal(
+            parsed.appealId || '',
+            parsed.status || 'APPROVED',
+            config.ownerId,
+            parsed.note || ''
+          );
+          res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok }));
         })
         .catch(() => {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -432,6 +512,20 @@ client.on('guildMemberAdd', async (member) => {
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   if (newMember.guild.id !== config.guildId) return;
+
+  if (oldMember.displayName !== newMember.displayName && !isWhitelisted(newMember, newMember.guild)) {
+    const impName = isImpersonationAttempt(newMember, newMember.guild);
+    if (impName) {
+      db.addRisk(newMember.id, 25, `İsim değişikliğinde kimliğe bürünme (${impName})`);
+      await logger.sendSystemAlert(
+        newMember.guild,
+        '🎭 İSİM DEĞİŞİKLİĞİNDE KİMLİĞE BÜRÜNME',
+        `**Üye:** <@${newMember.id}> (\`${newMember.id}\`)\n**Yeni İsim:** \`${newMember.displayName}\` | **Eşleşen:** \`${impName}\``,
+        0xf97316
+      );
+    }
+  }
+
   const added = newMember.roles.cache.filter((r) => !oldMember.roles.cache.has(r.id));
   const dangerous = added.filter((r) => isDangerousRole(r, newMember.guild));
   if (dangerous.size === 0) return;
@@ -531,6 +625,9 @@ client.on('channelCreate', async (channel) => {
 
 client.on('channelUpdate', async (oldChannel, newChannel) => {
   if (!newChannel.guild || newChannel.guild.id !== config.guildId) return;
+  if (oldChannel.permissionOverwrites?.cache?.size === newChannel.permissionOverwrites?.cache?.size) {
+    return;
+  }
   const executor = await findExecutor(newChannel.guild, AuditLogEvent.ChannelOverwriteUpdate, newChannel.id);
   if (executor) {
     await handleAntiNuke(
