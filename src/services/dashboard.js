@@ -100,12 +100,16 @@ function isAuthorized(req) {
   }
 }
 
-function getRecentBlacklist(limit = 20) {
+function getRecentBlacklist(limit = 25) {
   return db.db.prepare('SELECT * FROM blacklist ORDER BY created_at DESC LIMIT ?').all(limit);
 }
 
-function getRecentIpBans(limit = 20) {
+function getRecentIpBans(limit = 25) {
   return db.db.prepare('SELECT * FROM ip_bans ORDER BY created_at DESC LIMIT ?').all(limit);
+}
+
+function getRecentAppeals(limit = 20) {
+  return db.db.prepare('SELECT * FROM appeals ORDER BY seq DESC LIMIT ?').all(limit);
 }
 
 function buildOverview(client) {
@@ -130,9 +134,11 @@ function buildOverview(client) {
       whitelist: db.listWhitelist().length,
     },
     caseStats: db.getCaseStatsByType(),
-    recentCases: db.getRecentCases(30),
-    blacklistEntries: getRecentBlacklist(20),
-    ipBanEntries: getRecentIpBans(20),
+    recentCases: db.getRecentCases(40),
+    blacklistEntries: getRecentBlacklist(25),
+    ipBanEntries: getRecentIpBans(25),
+    whitelistEntries: db.listWhitelist().slice(0, 25),
+    appealEntries: getRecentAppeals(20),
     config: gcfg,
     rulesCount: RULES_80.length,
     rules: RULES_80,
@@ -147,7 +153,7 @@ function renderDashboardHtml(tokenParam = '') {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SENTINEL SOC NIRVANA — 80/80 Güvenlik Kontrol Merkezi</title>
+  <title>SENTINEL SOC OMEGA — 80/80 Güvenlik Kontrol Merkezi</title>
   <style>
     :root {
       --bg: #050811;
@@ -172,7 +178,7 @@ function renderDashboardHtml(tokenParam = '') {
       min-height: 100vh;
     }
     .sidebar {
-      width: 255px;
+      width: 260px;
       background: var(--panel);
       border-right: 1px solid var(--border);
       padding: 20px 14px;
@@ -309,11 +315,11 @@ function renderDashboardHtml(tokenParam = '') {
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand">🛡️ SENTINEL NIRVANA • 80/80</div>
+    <div class="brand">🛡️ SENTINEL OMEGA • 80/80</div>
     <button class="nav-btn active" data-tab="overview">Genel Bakış</button>
-    <button class="nav-btn" data-tab="cases">Vakalar & Analitik</button>
-    <button class="nav-btn" data-tab="lists">Kara Liste & IP İzolasyon</button>
-    <button class="nav-btn" data-tab="settings">Canlı Ayarlar & Raid</button>
+    <button class="nav-btn" data-tab="cases">Vakalar & İtirazlar</button>
+    <button class="nav-btn" data-tab="lists">Kara Liste, IP & Whitelist</button>
+    <button class="nav-btn" data-tab="settings">Canlı Ayarlar & Kalkanlar</button>
     <button class="nav-btn" data-tab="rules">80 Kural Matrisi</button>
   </aside>
 
@@ -356,12 +362,19 @@ function renderDashboardHtml(tokenParam = '') {
       <section id="tab-cases" class="tab-pane">
         <div class="grid" id="typeStats"></div>
         <div class="card">
+          <h3 style="margin-top:0;">Vaka Arama ve Silme</h3>
           <div class="form-row">
             <div class="field">
               <label for="caseFilter">Vaka veya Hedef Ara</label>
               <input id="caseFilter" type="text" placeholder="CASE-0001, BAN, ID..." />
             </div>
+            <div class="field">
+              <label for="deleteCaseId">Vaka ID Sil</label>
+              <input id="deleteCaseId" type="text" placeholder="CASE-0001" />
+            </div>
+            <button class="action danger" id="deleteCaseBtn">Vakayı Sil</button>
           </div>
+          <div id="caseStatus" style="font-size:13px;color:var(--accent-2);margin-bottom:10px;"></div>
           <table>
             <thead>
               <tr><th>Vaka</th><th>Tür</th><th>Hedef</th><th>Sebep</th></tr>
@@ -369,11 +382,39 @@ function renderDashboardHtml(tokenParam = '') {
             <tbody id="allCases"></tbody>
           </table>
         </div>
+
+        <div class="card">
+          <h3 style="margin-top:0;">İtiraz Yönetimi (APL-XXXX)</h3>
+          <div class="form-row">
+            <div class="field">
+              <label for="appealIdInput">İtiraz ID</label>
+              <input id="appealIdInput" type="text" placeholder="APL-0001" />
+            </div>
+            <div class="field">
+              <label for="appealStatusSel">Karar</label>
+              <select id="appealStatusSel">
+                <option value="APPROVED">Onayla</option>
+                <option value="REJECTED">Reddet</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="appealNoteInput">Not</label>
+              <input id="appealNoteInput" type="text" placeholder="İnceleme notu" />
+            </div>
+            <button class="action" id="reviewAppealBtn">Kararı Uygula</button>
+          </div>
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Kullanıcı</th><th>Durum</th><th>Gerekçe</th></tr>
+            </thead>
+            <tbody id="appealTable"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="tab-lists" class="tab-pane">
         <div class="card">
-          <h3 style="margin-top:0;">IP / Ağ İzolasyonu Ekle veya Kaldır</h3>
+          <h3 style="margin-top:0;">IP / Ağ İzolasyonu</h3>
           <div class="form-row">
             <div class="field">
               <label for="ipTarget">Kullanıcı ID veya Ağ Etiketi</label>
@@ -387,6 +428,31 @@ function renderDashboardHtml(tokenParam = '') {
             <button class="action secondary" id="removeIpBtn">İzolasyonu Kaldır</button>
           </div>
           <div id="listStatus" style="font-size:13px;color:var(--accent-2);"></div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0;">Güvenli Liste (Whitelist) Yönetimi</h3>
+          <div class="form-row">
+            <div class="field">
+              <label for="wlType">Tür</label>
+              <select id="wlType">
+                <option value="user">Kullanıcı</option>
+                <option value="role">Rol</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="wlId">ID</label>
+              <input id="wlId" type="text" placeholder="Kullanıcı veya Rol ID" />
+            </div>
+            <button class="action" id="addWlBtn">Ekle</button>
+            <button class="action secondary" id="removeWlBtn">Çıkar</button>
+          </div>
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Tür</th><th>Ekleyen</th></tr>
+            </thead>
+            <tbody id="wlTable"></tbody>
+          </table>
         </div>
 
         <div class="card">
@@ -527,6 +593,61 @@ function renderDashboardHtml(tokenParam = '') {
       refresh();
     });
 
+    document.getElementById('addWlBtn').addEventListener('click', async () => {
+      const targetId = document.getElementById('wlId').value.trim();
+      const targetType = document.getElementById('wlType').value;
+      if (!targetId) return;
+      const res = await fetch('/api/whitelist', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ action: 'add', targetId, targetType }),
+      });
+      const data = await res.json();
+      document.getElementById('listStatus').textContent = res.ok ? 'Güvenli listeye eklendi.' : (data.error || 'Hata');
+      refresh();
+    });
+
+    document.getElementById('removeWlBtn').addEventListener('click', async () => {
+      const targetId = document.getElementById('wlId').value.trim();
+      if (!targetId) return;
+      const res = await fetch('/api/whitelist', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ action: 'remove', targetId }),
+      });
+      const data = await res.json();
+      document.getElementById('listStatus').textContent = res.ok ? 'Güvenli listeden çıkarıldı.' : (data.error || 'Hata');
+      refresh();
+    });
+
+    document.getElementById('deleteCaseBtn').addEventListener('click', async () => {
+      const caseId = document.getElementById('deleteCaseId').value.trim();
+      if (!caseId) return;
+      const res = await fetch('/api/case-delete', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ caseId }),
+      });
+      const data = await res.json();
+      document.getElementById('caseStatus').textContent = res.ok ? 'Vaka silindi.' : (data.error || 'Bulunamadı');
+      refresh();
+    });
+
+    document.getElementById('reviewAppealBtn').addEventListener('click', async () => {
+      const appealId = document.getElementById('appealIdInput').value.trim();
+      const status = document.getElementById('appealStatusSel').value;
+      const note = document.getElementById('appealNoteInput').value.trim();
+      if (!appealId) return;
+      const res = await fetch('/api/appeal', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ appealId, status, note }),
+      });
+      const data = await res.json();
+      document.getElementById('caseStatus').textContent = res.ok ? 'İtiraz güncellendi.' : (data.error || 'Bulunamadı');
+      refresh();
+    });
+
     document.getElementById('backupBtn').addEventListener('click', async () => {
       const res = await fetch('/api/backup', { method: 'POST', headers: headers() });
       const data = await res.json();
@@ -583,6 +704,14 @@ function renderDashboardHtml(tokenParam = '') {
 
       document.getElementById('typeStats').innerHTML = (d.caseStats || [])
         .map(s => '<div class="card"><div class="k">' + s.type + '</div><div class="v">' + s.cnt + '</div></div>')
+        .join('');
+
+      document.getElementById('appealTable').innerHTML = (d.appealEntries || [])
+        .map(a => '<tr><td>' + a.id + '</td><td>' + a.user_id + '</td><td>' + a.status + '</td><td>' + a.reason + '</td></tr>')
+        .join('');
+
+      document.getElementById('wlTable').innerHTML = (d.whitelistEntries || [])
+        .map(w => '<tr><td>' + w.target_id + '</td><td>' + w.target_type + '</td><td>' + w.added_by + '</td></tr>')
         .join('');
 
       document.getElementById('ipTable').innerHTML = (d.ipBanEntries || [])
