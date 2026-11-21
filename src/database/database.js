@@ -36,6 +36,15 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS ip_bans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    network_tag TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    banned_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS whitelist (
     target_id TEXT PRIMARY KEY,
     target_type TEXT NOT NULL CHECK(target_type IN ('user', 'role')),
@@ -215,6 +224,10 @@ function getRecentCasesForUser(userId, limit = 5) {
     .all(String(userId), limit);
 }
 
+function getRecentCases(limit = 12) {
+  return db.prepare('SELECT * FROM cases ORDER BY seq DESC LIMIT ?').all(limit);
+}
+
 function getTotalCases() {
   return db.prepare('SELECT COUNT(*) AS cnt FROM cases').get().cnt;
 }
@@ -248,6 +261,43 @@ function getBlacklist(userId) {
 
 function countBlacklist() {
   return db.prepare('SELECT COUNT(*) AS cnt FROM blacklist').get().cnt;
+}
+
+function addIpBan({ userId = null, networkTag, reason, bannedBy }) {
+  db.prepare(
+    `INSERT INTO ip_bans (user_id, network_tag, reason, banned_by, created_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(
+    userId ? String(userId) : null,
+    String(networkTag || 'NET-ISOLATED').slice(0, 120),
+    String(reason || 'IP / Ag izolasyonu').slice(0, 500),
+    String(bannedBy),
+    Date.now()
+  );
+}
+
+function removeIpBanByTarget(target) {
+  const clean = String(target).trim();
+  const info = db
+    .prepare('DELETE FROM ip_bans WHERE user_id = ? OR network_tag = ?')
+    .run(clean, clean);
+  return info.changes > 0;
+}
+
+function isIpBannedForUserOrTag(userId, networkTag = null) {
+  if (userId) {
+    const r1 = db.prepare('SELECT 1 FROM ip_bans WHERE user_id = ?').get(String(userId));
+    if (r1) return true;
+  }
+  if (networkTag) {
+    const r2 = db.prepare('SELECT 1 FROM ip_bans WHERE network_tag = ?').get(String(networkTag));
+    if (r2) return true;
+  }
+  return false;
+}
+
+function countIpBans() {
+  return db.prepare('SELECT COUNT(*) AS cnt FROM ip_bans').get().cnt;
 }
 
 function addWhitelist(targetId, targetType, addedBy) {
@@ -389,10 +439,6 @@ function reviewAppeal(appealId, status, reviewedBy, note = '') {
   return info.changes > 0;
 }
 
-function getAppeal(appealId) {
-  return db.prepare('SELECT * FROM appeals WHERE id = ?').get(String(appealId).trim().toUpperCase()) || null;
-}
-
 function recordActionAndCount(actorId, actionType, targetId, windowMs) {
   const now = Date.now();
   const tx = db.transaction(() => {
@@ -447,12 +493,17 @@ module.exports = {
   createCase,
   deleteCaseById,
   getRecentCasesForUser,
+  getRecentCases,
   getTotalCases,
   getCaseStatsByType,
   addBlacklist,
   removeBlacklist,
   getBlacklist,
   countBlacklist,
+  addIpBan,
+  removeIpBanByTarget,
+  isIpBannedForUserOrTag,
+  countIpBans,
   addWhitelist,
   removeWhitelist,
   isWhitelistedId,
@@ -469,7 +520,6 @@ module.exports = {
   getExpiredQuarantines,
   createAppeal,
   reviewAppeal,
-  getAppeal,
   recordActionAndCount,
   getState,
   setState,
